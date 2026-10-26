@@ -1,0 +1,23 @@
+# 引擎二进制（保留目录）
+engine/*
+!engine/.gitkeep
+
+# 运行时数据
+data/debug/
+data/templates/*
+!data/templates/.gitkeep
+data/cls_dataset/
+data/models/*.pt
+data/calib.json
+data/calib_*.png
+data/debug_*.png
+data/templates_capture_preview.png
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.nnue
+.idea/
+.vscode/
+*.log

@@ -1,0 +1,65 @@
+# 天天象棋自动下棋配置
+
+# Pikafish 引擎路径（下载后改成实际路径）
+engine:
+  path: "engine/pikafish.exe"
+  nnue: "engine/pikafish.nnue"
+  threads: 4
+  hash_mb: 128
+  # 思考时间（毫秒）。越大棋力越强，走子越慢
+  movetime_ms: 800
+  # 或用深度限制（与 movetime 二选一，depth > 0 时优先）
+  depth: 0
+
+# 屏幕 / 鼠标
+screen:
+  # 截图监视器编号，主屏一般是 1
+  monitor: 1
+  # Windows DPI 缩放（100%=1.0, 125%=1.25, 150%=1.5）
+  # 若点击位置偏移，在这里调整
+  dpi_scale: 1.0
+
+mouse:
+  # 走子方式: click | drag | postmessage | both
+  # Cursor 内置终端常拦 SetCursorPos：用 both（真实点击失败会自动改消息点击）
+  # 管理员 CMD 下可改 click；消息无效的棋软再用 click/drag
+  mode: both
+  # 点击前移动耗时（秒）
+  move_duration: 0.15
+  # 选子与落子之间的间隔
+  click_interval: 0.35
+  # 走子后等待动画结束
+  after_move_wait: 1.5
+
+# 视觉识别
+vision:
+  # 后端: template | cnn
+  backend: cnn
+  # 校准文件
+  calib_file: "data/calib.json"
+  # 棋子模板目录（template 后端 / 采集 bootstrap）
+  templates_dir: "data/templates"
+  # CNN 数据集与模型
+  cls_dataset: "data/cls_dataset"
+  cnn_model: "data/models/piece_cls.onnx"
+  # CNN 置信度阈值
+  cnn_conf: 0.45
+  # 是否用颜色墨迹门控空位（建议开）
+  cnn_ink_gate: true
+  # 模板匹配阈值（0~1，越高越严格）
+  match_threshold: 0.42
+  # 空位判定：最高匹配分低于此值视为空
+  empty_threshold: 0.30
+  # 识别不稳定时二次截图间隔（秒）
+  reshoot_delay: 0.25
+
+bot:
+  # 我方颜色: auto | red | black
+  side: auto
+  # 主循环轮询间隔（秒）
+  poll_interval: 0.35
+  # 热键：暂停 / 退出
+  hotkey_pause: "f8"
+  hotkey_quit: "f9"
+  # 调试截图目录（空字符串关闭）
+  debug_dir: "data/debug"
