@@ -95,10 +95,14 @@ class Calibration:
         image: np.ndarray,
         sq: Square,
         scale: float = 0.72,
+        dx: float = 0.0,
+        dy: float = 0.0,
     ) -> np.ndarray:
-        """裁剪交叉点附近的棋子 ROI。"""
+        """裁剪交叉点附近的棋子 ROI。dx/dy 用于采集时模拟校准偏差。"""
         h, w = image.shape[:2]
         cx, cy = self.square_center_in_image(sq, w, h)
+        cx += dx
+        cy += dy
         cell_w = w / self.col_span
         cell_h = h / self.row_span
         rw = cell_w * scale

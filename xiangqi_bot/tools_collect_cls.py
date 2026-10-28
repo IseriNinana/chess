@@ -33,7 +33,8 @@ def export_board_cells(
     board: Board,
     out_dir: Path,
     prefix: str = "",
-    scales: tuple[float, ...] = (0.75, 0.85, 0.95),
+    scales: tuple[float, ...] = (0.70, 0.80, 0.90, 1.00),
+    offsets: tuple[tuple[int, int], ...] = ((0, 0),),
 ) -> int:
     """按 FEN 把每格 ROI 写入对应类别目录。返回写出张数。"""
     ensure_class_dirs(out_dir)
@@ -43,16 +44,22 @@ def export_board_cells(
         piece = board.piece_at(sq)
         folder = out_dir / char_to_folder(piece)
         for i, scale in enumerate(scales):
-            roi = calib.cell_roi(image, sq, scale=scale)
-            if roi.size == 0 or min(roi.shape[:2]) < 8:
-                continue
-            name = f"{tag}_{sq.uci}_s{i}.png"
-            _save_roi(folder / name, roi)
-            n += 1
+            for j, (dx, dy) in enumerate(offsets):
+                roi = calib.cell_roi(image, sq, scale=scale, dx=dx, dy=dy)
+                if roi.size == 0 or min(roi.shape[:2]) < 8:
+                    continue
+                name = f"{tag}_{sq.uci}_s{i}_j{j}.png"
+                _save_roi(folder / name, roi)
+                n += 1
     return n
 
 
-def bootstrap_from_templates(templates_dir: Path, out_dir: Path, copies: int = 12) -> int:
+def bootstrap_from_templates(
+    templates_dir: Path,
+    out_dir: Path,
+    copies: int = 36,
+    synth_empty: int = 0,
+) -> int:
     """用已有模板图生成增强样本，便于冷启动训练。"""
     from .vision.detect import TemplateDetector
 
@@ -66,11 +73,9 @@ def bootstrap_from_templates(templates_dir: Path, out_dir: Path, copies: int = 1
             aug = _augment(img, rng)
             _save_roi(folder / f"tmpl_{piece}_{i}.png", aug)
             n += 1
-    # 空位：用木纹噪声近似
     empty_dir = out_dir / "empty"
-    for i in range(max(copies * 2, 24)):
+    for i in range(max(0, synth_empty)):
         noise = rng.integers(40, 120, (IMG_SIZE, IMG_SIZE, 3), dtype=np.uint8)
-        # 偏暖木色
         noise[:, :, 0] = (noise[:, :, 0].astype(np.int16) * 0.5 + 30).clip(0, 255).astype(np.uint8)
         noise[:, :, 1] = (noise[:, :, 1].astype(np.int16) * 0.7 + 50).clip(0, 255).astype(np.uint8)
         noise[:, :, 2] = (noise[:, :, 2].astype(np.int16) * 0.9 + 70).clip(0, 255).astype(np.uint8)

@@ -8,9 +8,19 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .board import Board, Move, Square, maybe_snap_start, placement_equal
+from .board import (
+    Board,
+    Move,
+    Square,
+    describe_move_zh,
+    is_start_placement,
+    maybe_snap_start,
+    placement_diff_count,
+    placement_equal,
+)
 from .control.mouse import MouseController, enable_dpi_awareness
 from .engine import PikafishEngine
+from .narrator import MoveNarrator
 from .vision.calibrate import load_or_calibrate
 from .vision.capture import ScreenCapture
 from .vision.detect import annotate_board
@@ -63,10 +73,11 @@ class XiangqiBot:
             click_interval=float(mouse_cfg.get("click_interval", 0.25)),
             pad_y_cells=float(getattr(self.calib, "pad_y_cells", 0.5)),
             pad_x_cells=float(getattr(self.calib, "pad_x_cells", 0.5)),
-            mode=str(mouse_cfg.get("mode", "both")),
+            mode=str(mouse_cfg.get("mode", "click")),
             hwnd=hwnd,
         )
         self.after_move_wait = float(mouse_cfg.get("after_move_wait", 0.8))
+        self.narrator = MoveNarrator.from_config(cfg.get("narrator"))
 
         bot = cfg.get("bot", {})
         self.side_pref = str(bot.get("side", "auto")).lower()
@@ -81,6 +92,7 @@ class XiangqiBot:
         self.our_side: str | None = None  # 'w' or 'b'
         self.last_board: Board | None = None
         self.last_played: Move | None = None
+        self._played_at: float = 0.0
         self._repeat_guard: Move | None = None
         self._last_frame: np.ndarray | None = None
         self._ref_frame: np.ndarray | None = None
@@ -377,6 +389,22 @@ class XiangqiBot:
                 time.sleep(self.poll_interval)
                 continue
 
+            if self._should_start_new_game(board):
+                board = self._begin_new_game(board)
+                stable_pending = None
+                stable_hits = 0
+                if self._is_our_turn(board):
+                    self._play_until_opponent_turn(board)
+                    waiting_since = time.time()
+                    last_beat = 0.0
+                    print("等待对手出招…", flush=True)
+                else:
+                    waiting_since = time.time()
+                    self._snapshot_ref_frame()
+                    print("开局由对方先行，继续等待…", flush=True)
+                time.sleep(self.poll_interval)
+                continue
+
             board.side_to_move = self._infer_side_to_move(self.last_board, board)
             mv = self.last_board.diff_move(board)
             print(
@@ -436,6 +464,15 @@ class XiangqiBot:
                 if self._is_our_turn(current):
                     print("着法未确认，稍后重试…", flush=True)
                     time.sleep(0.8)
+                    # 必须重识别：否则会用过期/误识 FEN 反复下同一非法着
+                    try:
+                        fresh, _ = self.recognize()
+                        if self._board_usable(fresh):
+                            fresh.side_to_move = self.our_side or current.side_to_move
+                            self.last_board = fresh
+                            current = fresh
+                    except Exception as exc:
+                        print(f"重试前重识别失败: {exc}", flush=True)
                     continue
                 break
             hand += 1
@@ -480,6 +517,36 @@ class XiangqiBot:
         if moved_color == "b":
             return "w"
         return self.our_side or "w"
+
+    def _should_start_new_game(self, board: Board) -> bool:
+        """中局后重新摆成标准开局 → 开新对局。刚走完的一两格闪回不算。"""
+        if not is_start_placement(board):
+            return False
+        if self.last_board is None or is_start_placement(self.last_board):
+            return False
+        diffs = placement_diff_count(self.last_board, board)
+        if diffs >= 4:
+            return True
+        if self._played_at and (time.time() - self._played_at) < 6.0:
+            return False
+        return diffs >= 2
+
+    def _begin_new_game(self, board: Board) -> Board:
+        print("检测到初始棋局，开始新对局", flush=True)
+        try:
+            self.engine.new_game()
+        except Exception as exc:
+            print(f"引擎 ucinewgame 失败: {exc}", flush=True)
+        self.last_played = None
+        self._played_at = 0.0
+        self._repeat_guard = None
+        self._ref_frame = None
+        fresh = board.copy()
+        self.our_side = self.resolve_our_side(fresh)
+        print(f"我方: {'红' if self.our_side == 'w' else '黑'}", flush=True)
+        fresh.side_to_move = self.our_side
+        self.last_board = fresh
+        return fresh
 
     def _is_our_turn(self, board: Board) -> bool:
         return board.side_to_move == self.our_side
@@ -552,6 +619,20 @@ class XiangqiBot:
         except Exception:
             expected = None
 
+        move_zh = describe_move_zh(engine_board, move)
+        fen = engine_board.to_fen()
+        print(f"解说: {move_zh}  FEN={fen}", flush=True)
+        if self.narrator.announce(
+            fen=fen,
+            move=move.uci,
+            move_zh=move_zh,
+            side="red" if self.our_side == "w" else "black",
+        ):
+            delay = max(0.0, self.narrator.delay_s)
+            if delay:
+                print(f"等待鲸鱼娘解说 {delay:.0f}s 后再走…", flush=True)
+                time.sleep(delay)
+
         try:
             from .vision.window import bring_to_front, find_xiangqi_window
 
@@ -565,6 +646,7 @@ class XiangqiBot:
 
         self.mouse.play_move(move)
         self.last_played = move
+        self._played_at = time.time()
         time.sleep(max(self.after_move_wait, 1.2))
         confirmed = None
         for _ in range(5):
@@ -587,14 +669,31 @@ class XiangqiBot:
                 board, move, confirmed
             )
             if not landed:
-                # 局面有噪点变化但着法未落地 → 绝不能写成预期局面
-                board.side_to_move = self.our_side
-                self.last_board = board
-                print(
-                    f"警告: 着法 {move.uci} 未生效（起点仍有子或落点不符），"
-                    f"不按预期修正",
-                    flush=True,
-                )
+                # 着法未落地：采用确认识别（可能纠正误识），绝不能锁死旧 FEN
+                if self._board_usable(confirmed):
+                    confirmed.side_to_move = self.our_side
+                    self.last_board = confirmed
+                    if not placement_equal(confirmed, board):
+                        print(
+                            f"警告: 着法 {move.uci} 未生效；"
+                            f"盘面与引擎局面不一致，已改用确认识别 "
+                            f"{confirmed.to_fen(include_side=False)}",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"警告: 着法 {move.uci} 未生效（起点仍有子或落点不符），"
+                            f"不按预期修正",
+                            flush=True,
+                        )
+                else:
+                    board.side_to_move = self.our_side
+                    self.last_board = board
+                    print(
+                        f"警告: 着法 {move.uci} 未生效（起点仍有子或落点不符），"
+                        f"不按预期修正",
+                        flush=True,
+                    )
                 return False
             if self._looks_like_opponent_reply(expected, confirmed):
                 confirmed.side_to_move = self.our_side
@@ -617,7 +716,8 @@ class XiangqiBot:
         board.side_to_move = self.our_side
         self.last_board = board
         print(
-            "警告: 点击后局面无变化，可能坐标偏移。可调 config.yaml 里 screen.dpi_scale",
+            "警告: 点击后局面无变化。坐标可能偏移，或点击未送达。"
+            " 看启动时「鼠标注入」一行；独立进程失败则从开始菜单 CMD / play_red_admin.bat 运行。",
             flush=True,
         )
         return False

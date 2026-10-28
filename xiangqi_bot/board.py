@@ -26,6 +26,25 @@ PIECE_NAMES = {
     "p": "黑卒",
 }
 
+PIECE_ZH_SHORT = {
+    "K": "帅",
+    "A": "仕",
+    "B": "相",
+    "N": "马",
+    "R": "车",
+    "C": "炮",
+    "P": "兵",
+    "k": "将",
+    "a": "士",
+    "b": "象",
+    "n": "马",
+    "r": "车",
+    "c": "炮",
+    "p": "卒",
+}
+
+_ZH_NUM = "一二三四五六七八九"
+
 EXPECTED_COUNTS = {
     "K": 1,
     "k": 1,
@@ -304,6 +323,20 @@ def placement_equal(a: Board, b: Board) -> bool:
     return a.grid == b.grid
 
 
+def is_start_placement(board: Board) -> bool:
+    """是否为红在下的标准开局摆子（不含行棋方）。"""
+    return board.grid == Board.start().grid
+
+
+def placement_diff_count(a: Board, b: Board) -> int:
+    n = 0
+    for r in range(10):
+        for f in range(9):
+            if a.grid[r][f] != b.grid[r][f]:
+                n += 1
+    return n
+
+
 def start_agreement(board: Board) -> tuple[int, int, int, int]:
     """返回 (agree, occupied_start, missing, wrong_on_start)。"""
     start = Board.start()
@@ -383,3 +416,47 @@ def iter_squares() -> Iterable[Square]:
     for rank in range(10):
         for file in range(9):
             yield Square(file, rank)
+
+
+def _file_num_zh(file: int, red: bool) -> str:
+    n = (9 - file) if red else (file + 1)
+    return _ZH_NUM[n - 1]
+
+
+def describe_move_zh(board: Board, move: Move) -> str:
+    """红在下的标准盘上，把着法写成中文代数记号（如 炮二平五）。"""
+    piece = board.piece_at(move.frm)
+    if piece == ".":
+        return move.uci
+    red = piece.isupper()
+    name = PIECE_ZH_SHORT.get(piece, piece)
+    same_file = [
+        sq
+        for sq in iter_squares()
+        if board.piece_at(sq) == piece and sq.file == move.frm.file
+    ]
+    if len(same_file) >= 2:
+        ordered = sorted(same_file, key=(lambda s: -s.rank) if red else (lambda s: s.rank))
+        if len(ordered) == 2:
+            tags = ("前", "后")
+        elif len(ordered) == 3:
+            tags = ("前", "中", "后")
+        else:
+            tags = ("前",) + ("中",) * (len(ordered) - 2) + ("后",)
+        idx = next(i for i, sq in enumerate(ordered) if sq == move.frm)
+        prefix = tags[idx] + name
+    else:
+        prefix = name + _file_num_zh(move.frm.file, red)
+
+    frm, to = move.frm, move.to
+    dest_file = _file_num_zh(to.file, red)
+    if frm.rank == to.rank:
+        return prefix + "平" + dest_file
+    advancing = (to.rank > frm.rank) if red else (to.rank < frm.rank)
+    verb = "进" if advancing else "退"
+    kind = piece.upper()
+    if kind in "RCPK" and frm.file == to.file:
+        dest = _ZH_NUM[abs(to.rank - frm.rank) - 1]
+    else:
+        dest = dest_file
+    return prefix + verb + dest

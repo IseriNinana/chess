@@ -20,10 +20,9 @@ screen:
   dpi_scale: 1.0
 
 mouse:
-  # 走子方式: click | drag | postmessage | both
-  # Cursor 内置终端常拦 SetCursorPos：用 both（真实点击失败会自动改消息点击）
-  # 管理员 CMD 下可改 click；消息无效的棋软再用 click/drag
-  mode: both
+  # 走子方式: click | drag | postmessage（只执行一种，不再点完再拖）
+  # 天天象棋用 click。Cursor 终端若拦注入，会自动拉起独立点击进程。
+  mode: click
   # 点击前移动耗时（秒）
   move_duration: 0.15
   # 选子与落子之间的间隔
@@ -52,6 +51,13 @@ vision:
   empty_threshold: 0.30
   # 识别不稳定时二次截图间隔（秒）
   reshoot_delay: 0.25
+
+# 走子前通知鲸鱼娘解说（douyin-live Overlay，需先启动直播端）
+narrator:
+  enabled: true
+  url: "http://127.0.0.1:3210/xiangqi"
+  delay_s: 5
+  timeout_s: 2
 
 bot:
   # 我方颜色: auto | red | black

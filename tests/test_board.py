@@ -1,6 +1,14 @@
 """棋盘 / FEN 基础自检。"""
 
-from xiangqi_bot.board import START_FEN, Board, Move, Square
+from xiangqi_bot.board import (
+    START_FEN,
+    Board,
+    Move,
+    Square,
+    describe_move_zh,
+    is_start_placement,
+    placement_diff_count,
+)
 
 
 def test_start_fen_roundtrip():
@@ -29,7 +37,25 @@ def test_move_and_flip():
     assert flipped.piece_at(Square(4, 0)) == "k"
 
 
+def test_describe_move_zh():
+    b = Board.start()
+    assert describe_move_zh(b, Move.from_uci("h2e2")) == "炮二平五"
+    assert describe_move_zh(b, Move.from_uci("b0c2")) == "马八进七"
+    b2 = b.apply_move(Move.from_uci("h2e2"))
+    assert describe_move_zh(b2, Move.from_uci("b7e7")) == "炮二平五"
+
+
+def test_start_placement():
+    b = Board.start()
+    assert is_start_placement(b)
+    nxt = b.apply_move(Move.from_uci("b2e2"))
+    assert not is_start_placement(nxt)
+    assert placement_diff_count(b, nxt) == 2
+
+
 if __name__ == "__main__":
     test_start_fen_roundtrip()
     test_move_and_flip()
+    test_describe_move_zh()
+    test_start_placement()
     print("ok")

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 user32 = ctypes.windll.user32
 
-DEFAULT_TITLE_KEYWORDS = ("天天象棋", "中国象棋", "象棋", "QQ象棋")
+DEFAULT_TITLE_KEYWORDS = ("天天象棋", "中国象棋", "象棋", "QQ象棋", "雷电模拟器")
 
 
 @dataclass

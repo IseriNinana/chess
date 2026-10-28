@@ -1,4 +1,4 @@
-"""鼠标控制：支持真实鼠标点击/拖拽，以及对窗口 PostMessage（部分游戏更吃这套）。"""
+"""鼠标控制：真实 SendInput，以及 Cursor 终端拦注入时的独立点击进程。"""
 
 from __future__ import annotations
 
@@ -15,12 +15,15 @@ MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_ABSOLUTE = 0x8000
+MOUSEEVENTF_VIRTUALDESK = 0x4000
 INPUT_MOUSE = 0
 
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
 WM_MOUSEMOVE = 0x0200
 MK_LBUTTON = 0x0001
+
+ULONG_PTR = ctypes.c_size_t
 
 
 class MOUSEINPUT(ctypes.Structure):
@@ -30,7 +33,7 @@ class MOUSEINPUT(ctypes.Structure):
         ("mouseData", wintypes.DWORD),
         ("dwFlags", wintypes.DWORD),
         ("time", wintypes.DWORD),
-        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ("dwExtraInfo", ULONG_PTR),
     ]
 
 
@@ -40,6 +43,10 @@ class INPUT(ctypes.Structure):
 
     _anonymous_ = ("i",)
     _fields_ = [("type", wintypes.DWORD), ("i", _I)]
+
+
+user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
+user32.SendInput.restype = wintypes.UINT
 
 
 def enable_dpi_awareness() -> None:
@@ -55,30 +62,116 @@ def enable_dpi_awareness() -> None:
 enable_dpi_awareness()
 
 
-def _send_input_move_abs(x: int, y: int) -> None:
-    sw, sh = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
-    ax = int(x * 65535 / max(sw - 1, 1))
-    ay = int(y * 65535 / max(sh - 1, 1))
+def _virtual_desk() -> tuple[int, int, int, int]:
+    SM_XVIRTUALSCREEN = 76
+    SM_YVIRTUALSCREEN = 77
+    SM_CXVIRTUALSCREEN = 78
+    SM_CYVIRTUALSCREEN = 79
+    return (
+        int(user32.GetSystemMetrics(SM_XVIRTUALSCREEN)),
+        int(user32.GetSystemMetrics(SM_YVIRTUALSCREEN)),
+        int(user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)),
+        int(user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)),
+    )
+
+
+def _abs_norm(x: int, y: int) -> tuple[int, int]:
+    vx, vy, vw, vh = _virtual_desk()
+    ax = int(round((int(x) - vx) * 65535 / max(vw - 1, 1)))
+    ay = int(round((int(y) - vy) * 65535 / max(vh - 1, 1)))
+    return max(0, min(65535, ax)), max(0, min(65535, ay))
+
+
+def _mi(dx: int, dy: int, flags: int) -> INPUT:
     inp = INPUT()
     inp.type = INPUT_MOUSE
-    inp.mi = MOUSEINPUT(ax, ay, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0, None)
-    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+    inp.mi = MOUSEINPUT(dx, dy, 0, flags, 0, 0)
+    return inp
 
 
-def _send_input_click() -> None:
-    down = INPUT()
-    down.type = INPUT_MOUSE
-    down.mi = MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, None)
-    up = INPUT()
-    up.type = INPUT_MOUSE
-    up.mi = MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, None)
-    user32.SendInput(1, ctypes.byref(down), ctypes.sizeof(INPUT))
+def send_input(events: list[INPUT]) -> int:
+    if not events:
+        return 0
+    arr = (INPUT * len(events))(*events)
+    return int(user32.SendInput(len(events), arr, ctypes.sizeof(INPUT)))
+
+
+def cursor_pos() -> tuple[int, int]:
+    pt = wintypes.POINT()
+    user32.GetCursorPos(ctypes.byref(pt))
+    return int(pt.x), int(pt.y)
+
+
+def send_move_abs(x: int, y: int) -> int:
+    ax, ay = _abs_norm(x, y)
+    flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+    n = send_input([_mi(ax, ay, flags)])
+    if n != 1:
+        user32.SetCursorPos(int(x), int(y))
+    return n
+
+
+def send_click_at(x: int, y: int) -> bool:
+    """在屏幕坐标点击。按下与抬起分开发送，避免游戏把瞬时 down-up 丢掉。"""
+    try:
+        user32.ClipCursor(None)
+        user32.BlockInput(False)
+    except Exception:
+        pass
+    ax, ay = _abs_norm(x, y)
+    move = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+    send_input([_mi(ax, ay, move)])
+    user32.SetCursorPos(int(x), int(y))
     time.sleep(0.04)
-    user32.SendInput(1, ctypes.byref(up), ctypes.sizeof(INPUT))
+    down_n = send_input([_mi(0, 0, MOUSEEVENTF_LEFTDOWN)])
+    if not down_n:
+        user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    time.sleep(0.06)
+    up_n = send_input([_mi(0, 0, MOUSEEVENTF_LEFTUP)])
+    if not up_n:
+        user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+    return bool(down_n or up_n)
+
+
+def send_drag_at(x0: int, y0: int, x1: int, y1: int, duration: float = 0.12) -> None:
+    send_move_abs(x0, y0)
+    user32.SetCursorPos(int(x0), int(y0))
+    time.sleep(0.05)
+    send_input([_mi(0, 0, MOUSEEVENTF_LEFTDOWN)])
+    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    time.sleep(0.08)
+    steps = max(8, int(duration * 60))
+    for i in range(1, steps + 1):
+        x = int(x0 + (x1 - x0) * i / steps)
+        y = int(y0 + (y1 - y0) * i / steps)
+        send_move_abs(x, y)
+        user32.SetCursorPos(x, y)
+        time.sleep(duration / steps)
+    time.sleep(0.05)
+    send_input([_mi(0, 0, MOUSEEVENTF_LEFTUP)])
+    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+
+
+def injection_works() -> bool:
+    """试着把光标挪 1 像素再还原。失败说明本进程鼠标被拦（常见于 Cursor 终端）。"""
+    x, y = cursor_pos()
+    tx, ty = x + 1, y
+    try:
+        user32.ClipCursor(None)
+        user32.BlockInput(False)
+    except Exception:
+        pass
+    user32.SetCursorPos(tx, ty)
+    send_move_abs(tx, ty)
+    time.sleep(0.03)
+    nx, ny = cursor_pos()
+    user32.SetCursorPos(x, y)
+    send_move_abs(x, y)
+    return abs(nx - tx) <= 2 and abs(ny - ty) <= 2
 
 
 def _lparam(x: int, y: int) -> int:
-    return (y << 16) | (x & 0xFFFF)
+    return (int(y) << 16) | (int(x) & 0xFFFF)
 
 
 def _screen_to_client(hwnd: int, x: int, y: int) -> tuple[int, int]:
@@ -88,26 +181,32 @@ def _screen_to_client(hwnd: int, x: int, y: int) -> tuple[int, int]:
 
 
 def _window_from_point(x: int, y: int) -> int:
-    return int(user32.WindowFromPoint(wintypes.POINT(x, y)))
+    return int(user32.WindowFromPoint(wintypes.POINT(int(x), int(y))))
 
 
 def post_click_screen(x: int, y: int, hwnd: int | None = None) -> None:
-    """向命中窗口发送客户区点击消息。"""
-    target = hwnd or _window_from_point(x, y)
-    if not target:
+    """向命中控件发客户区点击。始终优先 WindowFromPoint，避免点到外壳窗口。"""
+    hit = _window_from_point(x, y)
+    targets: list[int] = []
+    for cand in (hit, hwnd or 0):
+        if cand and cand not in targets:
+            targets.append(int(cand))
+    if not targets:
         return
-    cx, cy = _screen_to_client(target, x, y)
-    user32.SendMessageW(target, WM_MOUSEMOVE, 0, _lparam(cx, cy))
-    user32.SendMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, _lparam(cx, cy))
-    time.sleep(0.05)
-    user32.SendMessageW(target, WM_LBUTTONUP, 0, _lparam(cx, cy))
-    # 再对顶级窗口补一次（有的棋软只听父窗口）
-    root = int(user32.GetAncestor(target, 2)) if target else 0  # GA_ROOT=2
-    if root and root != target:
-        cx2, cy2 = _screen_to_client(root, x, y)
-        user32.SendMessageW(root, WM_LBUTTONDOWN, MK_LBUTTON, _lparam(cx2, cy2))
-        time.sleep(0.03)
-        user32.SendMessageW(root, WM_LBUTTONUP, 0, _lparam(cx2, cy2))
+    for target in targets:
+        cx, cy = _screen_to_client(target, x, y)
+        if cx < -50 or cy < -50:
+            continue
+        user32.SendMessageW(target, WM_MOUSEMOVE, 0, _lparam(cx, cy))
+        user32.SendMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, _lparam(cx, cy))
+        time.sleep(0.04)
+        user32.SendMessageW(target, WM_LBUTTONUP, 0, _lparam(cx, cy))
+        root = int(user32.GetAncestor(target, 2)) if target else 0
+        if root and root not in targets:
+            cx2, cy2 = _screen_to_client(root, x, y)
+            user32.SendMessageW(root, WM_LBUTTONDOWN, MK_LBUTTON, _lparam(cx2, cy2))
+            time.sleep(0.02)
+            user32.SendMessageW(root, WM_LBUTTONUP, 0, _lparam(cx2, cy2))
 
 
 class MouseController:
@@ -119,7 +218,7 @@ class MouseController:
         click_interval: float = 0.25,
         pad_y_cells: float = 0.5,
         pad_x_cells: float = 0.5,
-        mode: str = "both",  # click | drag | postmessage | both
+        mode: str = "click",  # click | drag | postmessage | both
         hwnd: int | None = None,
     ):
         self.region = board_region
@@ -128,9 +227,39 @@ class MouseController:
         self.click_interval = click_interval
         self.pad_y_cells = pad_y_cells
         self.pad_x_cells = pad_x_cells
-        self.mode = (mode or "both").lower()
+        self.mode = (mode or "click").lower()
         self.hwnd = hwnd
-        self._cursor_ok = True  # SetCursorPos 失败后改走纯消息点击
+        self._cursor_ok = True
+        self._helper = None
+        self._probe_injection()
+
+    def _probe_injection(self) -> None:
+        ok = injection_works()
+        self._cursor_ok = ok
+        if ok:
+            print("鼠标注入: 本进程可用", flush=True)
+            return
+        print(
+            "鼠标注入: 本进程被拦截（Cursor 终端 / 完整性级别）。"
+            "正在启动独立点击进程…",
+            flush=True,
+        )
+        try:
+            from .click_agent import ClickAgentClient
+
+            self._helper = ClickAgentClient()
+            if self._helper.ensure():
+                print("鼠标注入: 独立点击进程已就绪", flush=True)
+            else:
+                self._helper = None
+                print(
+                    "鼠标注入: 独立进程启动失败。"
+                    "请从开始菜单开 CMD，或右键 play_red_admin.bat 管理员运行。",
+                    flush=True,
+                )
+        except Exception as exc:
+            self._helper = None
+            print(f"鼠标注入: 独立进程异常 {exc}", flush=True)
 
     def square_to_screen(self, sq: Square) -> tuple[int, int]:
         col_span = 8.0 + 2.0 * self.pad_x_cells
@@ -141,88 +270,41 @@ class MouseController:
         y = self.region.top + (self.pad_y_cells + (9 - sq.rank)) * cell_h
         return int(round(x / self.dpi_scale)), int(round(y / self.dpi_scale))
 
-    def _move_cursor(self, x: int, y: int) -> bool:
-        """尝试移动光标。成功返回 True。"""
-        # 解除可能的光标锁定 / 输入阻塞
-        try:
-            user32.ClipCursor(None)
-            user32.BlockInput(False)
-        except Exception:
-            pass
-        ok = bool(user32.SetCursorPos(int(x), int(y)))
-        _send_input_move_abs(x, y)
-        # 再用相对移动兜底（部分远程桌面只吃相对）
-        pt = wintypes.POINT()
-        user32.GetCursorPos(ctypes.byref(pt))
-        dx, dy = int(x) - int(pt.x), int(y) - int(pt.y)
-        if dx or dy:
-            user32.mouse_event(MOUSEEVENTF_MOVE, dx, dy, 0, 0)
-            user32.SetCursorPos(int(x), int(y))
-        time.sleep(0.02)
-        user32.GetCursorPos(ctypes.byref(pt))
-        if (pt.x, pt.y) != (int(x), int(y)):
-            if self._cursor_ok:
-                print(
-                    f"  !! cursor stuck at ({pt.x},{pt.y}), wanted ({x},{y}), "
-                    f"SetCursorPos={ok}. 已切换为窗口消息点击。"
-                    " 若仍无效：从开始菜单开 CMD，或右键 play_red_admin.bat 管理员运行"
-                    "（勿在 Cursor 内置终端跑点击）。"
-                )
+    def _real_click(self, x: int, y: int) -> bool:
+        if self._helper is not None:
+            if self._helper.click(x, y):
+                return True
+        ok = send_click_at(x, y)
+        after = cursor_pos()
+        if abs(after[0] - int(x)) > 8 or abs(after[1] - int(y)) > 8:
             self._cursor_ok = False
+            if self._helper is None:
+                try:
+                    from .click_agent import ClickAgentClient
+
+                    self._helper = ClickAgentClient()
+                    if self._helper.ensure():
+                        return self._helper.click(x, y)
+                except Exception:
+                    pass
             return False
         self._cursor_ok = True
-        return True
+        return ok or True
+
+    def _real_drag(self, x0: int, y0: int, x1: int, y1: int) -> None:
+        if self._helper is not None:
+            if self._helper.drag(x0, y0, x1, y1, self.move_duration):
+                return
+        send_drag_at(x0, y0, x1, y1, self.move_duration)
 
     def click_xy(self, x: int, y: int) -> None:
-        # 光标被系统拦住时（常见于 Cursor 终端 / 完整性级别不一致）改用消息点击
-        use_post = self.mode in ("postmessage", "both") or not self._cursor_ok
-        use_real = self.mode in ("click", "both", "drag") and self._cursor_ok
-
-        if use_post:
+        if self.mode == "postmessage":
             post_click_screen(x, y, self.hwnd)
-        if use_real:
-            moved = self._move_cursor(x, y)
-            if not moved:
-                post_click_screen(x, y, self.hwnd)
-                return
-            time.sleep(0.03)
-            _send_input_click()
-            user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-            time.sleep(0.04)
-            user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-        elif not use_post:
-            # mode=click 且光标已废：仍发消息
-            post_click_screen(x, y, self.hwnd)
+            return
+        self._real_click(x, y)
 
     def drag_xy(self, x0: int, y0: int, x1: int, y1: int) -> None:
-        self._move_cursor(x0, y0)
-        time.sleep(0.05)
-        user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-        _send_input = INPUT()
-        _send_input.type = INPUT_MOUSE
-        _send_input.mi = MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, None)
-        user32.SendInput(1, ctypes.byref(_send_input), ctypes.sizeof(INPUT))
-        time.sleep(0.08)
-        steps = max(8, int(self.move_duration * 60))
-        for i in range(1, steps + 1):
-            x = int(x0 + (x1 - x0) * i / steps)
-            y = int(y0 + (y1 - y0) * i / steps)
-            self._move_cursor(x, y)
-            time.sleep(self.move_duration / steps)
-        time.sleep(0.05)
-        user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-        up = INPUT()
-        up.type = INPUT_MOUSE
-        up.mi = MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, None)
-        user32.SendInput(1, ctypes.byref(up), ctypes.sizeof(INPUT))
-
-        if self.mode in ("postmessage", "both") and self.hwnd:
-            # 消息拖拽：down -> move -> up
-            c0x, c0y = _screen_to_client(self.hwnd, x0, y0)
-            c1x, c1y = _screen_to_client(self.hwnd, x1, y1)
-            user32.SendMessageW(self.hwnd, WM_LBUTTONDOWN, MK_LBUTTON, _lparam(c0x, c0y))
-            user32.SendMessageW(self.hwnd, WM_MOUSEMOVE, MK_LBUTTON, _lparam(c1x, c1y))
-            user32.SendMessageW(self.hwnd, WM_LBUTTONUP, 0, _lparam(c1x, c1y))
+        self._real_drag(x0, y0, x1, y1)
 
     def click_square(self, sq: Square) -> None:
         x, y = self.square_to_screen(sq)
@@ -232,20 +314,11 @@ class MouseController:
     def play_move(self, move: Move) -> None:
         x0, y0 = self.square_to_screen(move.frm)
         x1, y1 = self.square_to_screen(move.to)
-        effective = self.mode if self._cursor_ok else "postmessage"
-        print(f"  move {move.uci}: ({x0},{y0}) -> ({x1},{y1}) mode={effective}")
-        if effective == "drag":
+        via = "helper" if self._helper is not None else ("inproc" if self._cursor_ok else "postmessage")
+        print(f"  move {move.uci}: ({x0},{y0}) -> ({x1},{y1}) mode={self.mode} via={via}")
+        if self.mode == "drag":
             self.drag_xy(x0, y0, x1, y1)
-        elif effective == "both":
-            # 先两点点击，再补一枪拖拽，兼容不同棋软
-            self.click_xy(x0, y0)
-            time.sleep(self.click_interval)
-            self.click_xy(x1, y1)
-            if self._cursor_ok:
-                time.sleep(0.15)
-                self.drag_xy(x0, y0, x1, y1)
-        else:
-            # click / postmessage：两点点击
-            self.click_xy(x0, y0)
-            time.sleep(self.click_interval)
-            self.click_xy(x1, y1)
+            return
+        self.click_xy(x0, y0)
+        time.sleep(self.click_interval)
+        self.click_xy(x1, y1)
